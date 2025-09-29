@@ -1,0 +1,15 @@
+sdk011.bmw.com:10050
+sdk011.bmw.com:123
+sdk011.bmw.com:80
+serpong.bmw.com:10050
+serpong.bmw.com:123
+serpong.bmw.com:80
+slack-8-51.bmw.com:10050
+slack-8-51.bmw.com:123
+slack-8-51.bmw.com:80
+softwareroboterpic.bmw.com:10050
+softwareroboterpic.bmw.com:123
+softwareroboterpic.bmw.com:80
+stagingblogdownloadspostgresmx.bmw.com:10050
+stagingblogdownloadspostgresmx.bmw.com:123
+stagingblogdownloadspostgresmx.bmw.com:80

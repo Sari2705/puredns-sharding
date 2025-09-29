@@ -1,0 +1,3 @@
+sftpcontent.bmw.com
+snl.bmw.com
+static3.bmw.com

@@ -1,0 +1,4 @@
+strong.bmw.com
+sw1.bmw.com
+tapi.bmw.com
+tracking-api.bmw.com

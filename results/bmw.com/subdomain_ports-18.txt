@@ -1,0 +1,9 @@
+9jpyxnxn31yx.bmw.com:10050
+9jpyxnxn31yx.bmw.com:123
+9jpyxnxn31yx.bmw.com:80
+activestat05.bmw.com:10050
+activestat05.bmw.com:123
+activestat05.bmw.com:80
+airlink-stage.bmw.com:10050
+airlink-stage.bmw.com:123
+airlink-stage.bmw.com:80

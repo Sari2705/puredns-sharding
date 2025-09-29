@@ -1,0 +1,4 @@
+app-int.bmwgroup.com
+auth-t.bmwgroup.com
+awp.bmwgroup.com
+b2bconnect.bmwgroup.com

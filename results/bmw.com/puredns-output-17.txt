@@ -1,0 +1,7 @@
+amc-test.bmw.com
+amos.bmw.com
+anl.bmw.com
+api-dev2.bmw.com
+api-sandbox-dev.bmw.com
+auth-t.bmw.com
+b2b-test.bmw.com

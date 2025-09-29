@@ -1,0 +1,3 @@
+casa.bmw.com
+configure.bmw.com
+csc.bmw.com

@@ -1,0 +1,17 @@
+hydra4.bmw.com:10050
+hydra4.bmw.com:123
+hydra4.bmw.com:80
+iche-e.bmw.com:10050
+iche-e.bmw.com:123
+iche-e.bmw.com:80
+ifd.bmw.com:80
+ihmposgateway-i-st-us-east-1.bmw.com:10050
+ihmposgateway-i-st-us-east-1.bmw.com:123
+ihmposgateway-i-st-us-east-1.bmw.com:80
+ip3.bmw.com:443
+ip3.bmw.com:80
+itms.bmw.com:443
+itms.bmw.com:80
+jpgraci.bmw.com:10050
+jpgraci.bmw.com:123
+jpgraci.bmw.com:80

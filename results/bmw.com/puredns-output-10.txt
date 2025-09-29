@@ -1,0 +1,5 @@
+ide.bmw.com
+ifd.bmw.com
+input.bmw.com
+ip3.bmw.com
+itms.bmw.com

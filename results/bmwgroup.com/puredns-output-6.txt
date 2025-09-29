@@ -1,0 +1,8 @@
+pca.bmwgroup.com
+pgp.bmwgroup.com
+pix.bmwgroup.com
+pix3.bmwgroup.com
+pixi.bmwgroup.com
+poc2.bmwgroup.com
+pp-api.bmwgroup.com
+public-example.bmwgroup.com

@@ -1,0 +1,490 @@
+name: puredns-quick-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      chunk_start:
+        description: 'First chunk index this run will process (integer)'
+        required: true
+        default: '0'
+      total_chunks:
+        description: 'DEPRECATED: Total chunks is now auto-detected.'
+        required: false
+      run_counter:
+        description: 'Automatic run counter for recursion (auto-incremented)'
+        required: false
+        default: '0'
+      max_runs:
+        description: 'Safety cap: stop after this many runs. If unset, it is auto-calculated.'
+        required: false
+        default: '999'
+      words_per_chunk:
+        description: 'Words per chunk file (lines_per_chunk).'
+        required: false
+        default: '40000'
+      domains_count:
+        description: 'How many test domains to generate (default = 5)'
+        required: false
+        default: '5'
+
+env:
+  WORKFLOW_FILE: puredns-quicktest.yml
+  MATRIX_SIZE: '20'
+
+jobs:
+  prepare:
+    name: prepare-wordlists-and-resolvers
+    runs-on: ubuntu-latest
+    env:
+      COMBINED_WORDLIST: combined-wordlist.txt
+    outputs:
+      artifact-name: wordlists-artifact
+      total-chunks: ${{ steps.finalize_prep.outputs.total-chunks }}
+      effective-max-runs: ${{ steps.finalize_prep.outputs.effective-max-runs }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      - name: Install Go tools
+        run: go install -v github.com/tomnomnom/anew@latest
+      - name: Cache Raw Wordlists
+        uses: actions/cache@v3
+        with:
+          path: |
+            best-wordlist-level1.txt
+            best-wordlist-level2.txt
+          key: raw-wordlists-cache-v1-${{ runner.os }}
+      - name: Fetch wordlists and Resolvers
+        run: |
+          if [ ! -f best-wordlist-level1.txt ]; then wget -qO best-wordlist-level1.txt https://raw.githubusercontent.com/trickest/wordlists/main/inventory/levels/level1.txt; fi
+          if [ ! -f best-wordlist-level2.txt ]; then wget -qO best-wordlist-level2.txt https://raw.githubusercontent.com/trickest/wordlists/main/inventory/levels/level2.txt; fi
+          wget -qO resolvers.txt https://raw.githubusercontent.com/rix4uni/resolvers/main/resolvers.txt
+          wget -qO resolvers-trusted.txt https://raw.githubusercontent.com/and0x00/resolvers.txt/main/resolvers.txt
+      - name: Build filter_wordlist tool
+        run: |
+          if [ -f "filter_wordlist.go" ]; then go build -o filter_wordlist filter_wordlist.go; fi
+
+      - name: Cache Filtered Wordlist
+        id: cache-filtered-wordlist
+        uses: actions/cache@v3
+        with:
+          path: ${{ env.COMBINED_WORDLIST }}
+          key: filtered-wordlist-cache-v1-${{ runner.os }}-${{ hashFiles('best-wordlist-*.txt', 'filter_wordlist.go') }}
+      - name: Filter and Combine Wordlists
+        if: steps.cache-filtered-wordlist.outputs.cache-hit != 'true'
+        run: |
+          if [ -f ./filter_wordlist ]; then
+            ./filter_wordlist best-wordlist-level1.txt > best-wordlist-filtered.txt
+            ./filter_wordlist best-wordlist-level2.txt > best-wordlist-level2-filtered.txt
+          else
+            cp best-wordlist-level1.txt best-wordlist-filtered.txt
+            cp best-wordlist-level2.txt best-wordlist-level2-filtered.txt
+          fi
+          cat best-wordlist-filtered.txt best-wordlist-level2-filtered.txt | PATH=$HOME/go/bin:$PATH anew -q ${{ env.COMBINED_WORDLIST }}
+      - name: Finalize Preparation and Split Chunks
+        id: finalize_prep
+        run: |
+          mkdir -p domains wordlists results
+          if [ ! -f "domains/domains.txt" ]; then
+            for i in $(seq 1 "${{ github.event.inputs.domains_count }}"); do echo "test${i}.example.com"; done > "domains/domains.txt"
+          fi
+          COMBINED_WORDLIST="${{ env.COMBINED_WORDLIST }}"
+          if [ ! -s "$COMBINED_WORDLIST" ]; then echo "::error:: Combined wordlist is empty."; exit 0; fi
+          rm -f wordlists/chunk-*.txt || true
+          split -l "${{ github.event.inputs.words_per_chunk }}" -d -a 5 --additional-suffix=.txt "$COMBINED_WORDLIST" wordlists/chunk-
+          if [ -z "$(ls -A wordlists)" ]; then echo "::error:: Split failed to create chunks."; exit 0; fi
+          CHUNK_COUNT=$(ls -1 wordlists/chunk-*.txt | wc -l)
+          echo "total-chunks=${CHUNK_COUNT}" >> $GITHUB_OUTPUT
+          MATRIX_SIZE=${{ env.MATRIX_SIZE }}
+          CALCULATED_RUNS=$(( (CHUNK_COUNT + MATRIX_SIZE - 1) / MATRIX_SIZE ))
+          USER_MAX_RUNS=${{ github.event.inputs.max_runs }}
+          EFFECTIVE_MAX_RUNS=$(( CALCULATED_RUNS < USER_MAX_RUNS ? CALCULATED_RUNS : USER_MAX_RUNS ))
+          echo "effective-max-runs=${EFFECTIVE_MAX_RUNS}" >> $GITHUB_OUTPUT
+      
+      - name: Upload binaries and wordlists as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wordlists-artifact
+          path: |
+            wordlists
+            resolvers.txt
+            resolvers-trusted.txt
+            domains/domains.txt
+
+
+  generate_matrix:
+    name: Generate Dynamic Matrix
+    runs-on: ubuntu-latest
+    needs: prepare
+    outputs:
+      shard_matrix: ${{ steps.gen_matrix.outputs.shard_matrix }}
+    steps:
+      - name: Calculate shards for this run
+        id: gen_matrix
+        run: |
+          TOTAL_CHUNKS=${{ needs.prepare.outputs.total-chunks }}
+          CHUNK_START=${{ github.event.inputs.chunk_start }}
+          MATRIX_SIZE=${{ env.MATRIX_SIZE }}
+          CHUNKS_REMAINING=$(( TOTAL_CHUNKS - CHUNK_START ))
+          if (( CHUNKS_REMAINING < 0 )); then CHUNKS_REMAINING=0; fi
+          SHARDS_THIS_RUN=$(( CHUNKS_REMAINING < MATRIX_SIZE ? CHUNKS_REMAINING : MATRIX_SIZE ))
+          if (( SHARDS_THIS_RUN <= 0 )); then
+            echo "shard_matrix=[]" >> $GITHUB_OUTPUT
+          else
+            MATRIX_JSON=$(jq -cn --argjson n "$SHARDS_THIS_RUN" '[range($n)]')
+            echo "Generated matrix for ${SHARDS_THIS_RUN} shards: $MATRIX_JSON"
+            echo "shard_matrix=$MATRIX_JSON" >> $GITHUB_OUTPUT
+          fi
+
+  brute:
+    name: bruteforce-shard (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    needs: [prepare, generate_matrix]
+    if: needs.generate_matrix.outputs.shard_matrix != '[]'
+    container:
+      image: ghcr.io/pcoder7/spider-puredns-actions:latest
+      credentials:
+        username: ${{ secrets.GHCR_USER }}
+        password: ${{ secrets.GHCR_TOKEN }}    
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.generate_matrix.outputs.shard_matrix) }}
+    steps:
+      - name: Checkout repo (for committing results)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0   
+          
+      - name: Download artifacts (binaries and wordlists)
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.prepare.outputs.artifact-name }}
+          path: .
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Cache Go modules & binaries
+        uses: actions/cache@v3
+        with:
+          path: |
+            $HOME/go/pkg/mod
+            ~/.cache/go-build
+            $HOME/go/bin
+          key: ${{ runner.os }}-go-cache-${{ github.ref_name }}
+          restore-keys: |
+            ${{ runner.os }}-go-cache-
+
+      - name: Install Tools
+        run: |
+
+          # Installing inscope
+          if ! command -v inscope >/dev/null; then
+            echo "Installing inscope…"
+            go install -v github.com/tomnomnom/hacks/inscope@latest
+          else
+            echo "inscope already in cache"
+          fi    
+          
+      - name: Run puredns bruteforce
+        shell: bash
+        run: |
+          CHUNK_INDEX=$(( ${{ github.event.inputs.chunk_start }} + ${{ matrix.shard }} ))
+          CHUNK_FILE="wordlists/chunk-$(printf '%05d' "$CHUNK_INDEX").txt"
+          if [ ! -f "$CHUNK_FILE" ]; then exit 0; fi
+          while IFS= read -r domain || [ -n "$domain" ]; do
+            case "$domain" in \#*|"") continue ;; esac
+            ROOT_DOMAIN_DIR="results/$domain"
+            mkdir -p "$ROOT_DOMAIN_DIR"
+            cat "$CHUNK_FILE" | puredns bruteforce "$domain" -r "resolvers.txt" --rate-limit 5000 --rate-limit-trusted 2000 \
+              --resolvers-trusted "resolvers-trusted.txt" --wildcard-tests 300 --wildcard-batch 100000 \
+              --write "${ROOT_DOMAIN_DIR}/puredns-output-${CHUNK_INDEX}.txt" \
+              --write-wildcards "${ROOT_DOMAIN_DIR}/wildcards-${CHUNK_INDEX}.txt" \
+              --write-massdns "${ROOT_DOMAIN_DIR}/massdns-${CHUNK_INDEX}.txt" --quiet
+          done < "domains/domains.txt"
+
+      - name: Perform Port Scanning
+        shell: bash
+        run: |
+          
+
+          PORTS="80,443,8080,8443,8000"
+          CHUNK_INDEX=$(( ${{ github.event.inputs.chunk_start }} + ${{ matrix.shard }} ))
+
+          
+          echo "DEBUG: port-scan step CHUNK_INDEX=$CHUNK_INDEX"
+          find "results" -type f -name "*-${CHUNK_INDEX}.txt" -printf "%p %s bytes\n" || \
+            find "results" -type f -name "*-${CHUNK_INDEX}.txt" -exec stat -c '%n %s bytes' {} +
+          
+          
+          while IFS= read -r domain || [ -n "$domain" ]; do
+            case "$domain" in \#*|"") continue ;; esac
+            ROOT_DOMAIN_DIR="results/$domain"
+            MASSDNS_INPUT_FILE="${ROOT_DOMAIN_DIR}/massdns-${CHUNK_INDEX}.txt"
+            if [ ! -s "$MASSDNS_INPUT_FILE" ]; then continue; fi
+            
+            TMP_IP2SUB=$(mktemp)
+            
+            echo "▶ Reading RAW data from $MASSDNS_INPUT_FILE and cleaning it..."
+            # ---------- DIAGNOSTICS: head/tail and difference between massdns and puredns-output ----------
+            # show first/last 5 lines for any large chunk files (safe, null-delimited)
+            find "$ROOT_DOMAIN_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -size +1k -print0 | while IFS= read -r -d '' f; do
+                      echo "== $f (head) =="
+                      head -n5 "$f" || true
+                      echo "== $f (tail) =="
+                      tail -n5 "$f" || true
+            done
+
+            # compare normalized hostnames: massdns vs puredns-output for this domain & chunk
+            TMP_VALID=$(mktemp)
+            TMP_MASS=$(mktemp)
+            if [ -s "${ROOT_DOMAIN_DIR}/puredns-output-${CHUNK_INDEX}.txt" ]; then
+                      awk '{ gsub(/\.$/,"",$1); print tolower($1) }' "${ROOT_DOMAIN_DIR}/puredns-output-${CHUNK_INDEX}.txt" | sort -u > "$TMP_VALID"
+            else
+                      echo "DEBUG: no puredns-output for ${ROOT_DOMAIN_DIR}/puredns-output-${CHUNK_INDEX}.txt"
+                      rm -f "$TMP_VALID" "$TMP_MASS"
+                      # continue here would skip later code; we keep going because your script already handles empty massdns
+            fi
+
+            if [ -s "$MASSDNS_INPUT_FILE" ]; then
+                      awk '{ gsub(/\.$/,"",$1); print tolower($1) }' "$MASSDNS_INPUT_FILE" | sort -u > "$TMP_MASS"
+            else
+                      echo "DEBUG: no massdns file at $MASSDNS_INPUT_FILE"
+            fi
+
+            if [ -s "$TMP_MASS" ] && [ -s "$TMP_VALID" ]; then
+                      echo "DEBUG: hostnames in massdns but NOT in puredns-output (showing up to 50):"
+                      comm -23 "$TMP_MASS" "$TMP_VALID" | head -n 50 || true
+                      echo "DEBUG: counts - massdns unique hosts: $(wc -l < "$TMP_MASS" 2>/dev/null || echo 0), puredns validated: $(wc -l < "$TMP_VALID" 2>/dev/null || echo 0)"
+            fi
+
+            rm -f "$TMP_VALID" "$TMP_MASS"
+            # ---------- end diagnostics ----------
+            
+            
+            # --- THE FIX, PART 1: CONTEXT-AWARE FILTERING ---
+            # This reads the large, raw massdns file (e.g., massdns-2.txt with 9000 lines).
+            # It then filters it down to ONLY the A-records that belong to the current domain.
+            awk -v domain="$domain" '
+              $1 ~ "\\." domain "\\.?$" && $2 == "A" {
+                sub(/\.$/, "", $1);
+                print $3, $1
+              }
+            ' "$MASSDNS_INPUT_FILE" | sort -u > "$TMP_IP2SUB"
+
+            # --- THE FIX, PART 2: THE OVERWRITE ---
+            # This replaces the raw 9000-line file with the small, clean list of IPs and Subdomains.
+            # After this line runs, massdns-2.txt will contain the clean data you expect.
+            cat "$TMP_IP2SUB" > "$MASSDNS_INPUT_FILE"
+            echo "✅ Overwrote $MASSDNS_INPUT_FILE with $(wc -l < "$TMP_IP2SUB") clean A-records."
+
+            # If the file is now empty after filtering, there's nothing left to do for this domain.
+            if [ ! -s "$MASSDNS_INPUT_FILE" ]; then
+                rm -f "$TMP_IP2SUB"
+                continue
+            fi
+            
+            # --- The rest of the script now operates on the clean data ---
+            
+            TMP_IP_ONLY=$(mktemp)
+            TMP_NONCDN=$(mktemp)
+            TMP_CDN=$(mktemp)
+            TMP_NAABU_RUSTSCAN=$(mktemp)
+
+            cut -d' ' -f1 "$TMP_IP2SUB" | sort -u > "$TMP_IP_ONLY"
+            cat "$TMP_IP_ONLY" | cut-cdn -ua -t 50 -silent -o "$TMP_NONCDN"
+            cat "$TMP_IP_ONLY" | PATH=$HOME/go/bin:$PATH anew -d "$TMP_NONCDN" > "$TMP_CDN"
+            
+            if [ -s "$TMP_NONCDN" ]; then
+              TMP_RUSTSCAN=$(mktemp)
+              naabu -l "$TMP_NONCDN" -passive -o "$TMP_NAABU_RUSTSCAN" -no-color -silent || true
+              rustscan -a "$TMP_NONCDN" -p "$PORTS" --no-banner -t 5000 -b 300 --greppable > "$TMP_RUSTSCAN" || true
+              cat "$TMP_RUSTSCAN" | awk -F ' -> ' '{ gsub(/[\[\]]/, "", $2); n = split($2, p, ","); for(i=1;i<=n;i++) print $1 ":" p[i] }' | PATH=$HOME/go/bin:$PATH anew -q "$TMP_NAABU_RUSTSCAN" || true
+              rm -f "$TMP_RUSTSCAN"
+            fi
+            
+            FINAL_IP_LIST=$(mktemp)
+            cat "$TMP_NAABU_RUSTSCAN" "$TMP_CDN" | sort -u > "$FINAL_IP_LIST"
+
+            OUTPUT_FILE="${ROOT_DOMAIN_DIR}/subdomain_ports-${CHUNK_INDEX}.txt"
+            awk -F: '
+              NF==2 { print $1, $2 }
+              NF==1 { print $1, ""  }
+            ' "$FINAL_IP_LIST" \
+              | sort -k1,1 \
+              | join -t' ' -1 1 -2 1 - "$TMP_IP2SUB" \
+              | awk '{ if ($2 ~ /^[0-9]+$/) print $3":"$2; else print $3 }' \
+              > "$OUTPUT_FILE"
+            
+            echo "✅ Generated $OUTPUT_FILE"
+            
+            rm -f "$TMP_IP2SUB" "$TMP_IP_ONLY" "$TMP_NONCDN" "$TMP_CDN" "$TMP_NAABU_RUSTSCAN" "$FINAL_IP_LIST"
+
+          done < "domains/domains.txt"
+          
+      - name: Sanitize and Finalize Results
+        shell: bash
+        run: |
+          
+          CHUNK_INDEX=$(( ${{ github.event.inputs.chunk_start }} + ${{ matrix.shard }} ))
+
+          echo "DEBUG: matrix.shard='${{ matrix.shard }}' chunk_start='${{ github.event.inputs.chunk_start }}' CHUNK_INDEX=$CHUNK_INDEX"
+
+          # show any pre-existing result files for this chunk (if any)
+          find "results" -type f -name "*-${CHUNK_INDEX}.txt" -printf "%p %s bytes\n" || \
+            find "results" -type f -name "*-${CHUNK_INDEX}.txt" -exec stat -c '%n %s bytes' {} +
+          
+          echo "Sanitizing results for shard ${CHUNK_INDEX}..."
+          
+          find "results" -type f -name "*-${CHUNK_INDEX}.txt" | while read file; do
+            echo "  -> Processing $file"
+            TEMP_FILE=$(mktemp)
+            
+            if [[ "$file" == *"massdns-"* ]]; then
+              awk 'NF > 0 { $1=$1; print }' "$file" > "$TEMP_FILE"
+            else
+              awk 'NF > 0 { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, ""); print }' "$file" > "$TEMP_FILE"
+            fi
+            
+            mv "$TEMP_FILE" "$file"
+          done
+          echo "Sanitization complete for shard ${CHUNK_INDEX}."
+
+      - name: Commit Shard-Specific Results
+        shell: bash
+        env:
+          PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GIT_REPO: ${{ github.repository }}
+          GIT_BRANCH: ${{ github.ref_name }}
+        run: |
+          SOURCE_RESULTS_DIR="${GITHUB_WORKSPACE}/results"
+          CHUNK_INDEX=$(( ${{ github.event.inputs.chunk_start }} + ${{ matrix.shard }} ))
+
+          if ! find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -print -quit | grep -q .; then
+                    echo "No result files found for shard ${CHUNK_INDEX}. Nothing to commit."
+                    exit 0
+          fi
+
+          TMP_DIR=$(mktemp -d)
+          echo "Cloning ${GIT_REPO} into temporary directory ${TMP_DIR}..."
+          git clone --depth 1 "https://x-access-token:${PAT_TOKEN}@github.com/${GIT_REPO}.git" --branch "$GIT_BRANCH" "$TMP_DIR"
+          cd "$TMP_DIR"
+
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions-bot@users.noreply.github.com"
+
+          find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -printf "%p %s bytes\n"
+
+          merge_new_data() {
+                    local source_file="$1"
+                    local relative_path="${source_file#$SOURCE_RESULTS_DIR/}"
+                    local dest_file="$TMP_DIR/results/$relative_path"
+
+                    mkdir -p "$(dirname "$dest_file")"
+                    TEMP_MERGED=$(mktemp)
+
+                    if [[ "$source_file" == *"massdns-"* ]]; then
+                              # For massdns: we expect the source to be already filtered (see bruteforce step).
+                              # Overwrite dest with the cleaned source (dedupe defensively).
+                              awk '!seen[$0]++' "$source_file" > "$TEMP_MERGED"
+                    else
+                              # For other result types, sort-unique the source and write it as authoritative.
+                              sort -u "$source_file" > "$TEMP_MERGED"
+                    fi
+
+                    mv "$TEMP_MERGED" "$dest_file"
+          }
+
+          while IFS= read -r -d $'\0' file; do
+                    echo "  -> Merging $file into repository's results/ directory"
+                    merge_new_data "$file"
+          done < <(find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -print0)
+
+          echo "DEBUG: Files found under SOURCE_RESULTS_DIR before merge:"
+          find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -printf "%p %s bytes\n" || \
+            find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -exec stat -c '%n %s bytes' {} +
+
+          # show first/last 5 lines for large files to inspect unexpected content
+          find "$SOURCE_RESULTS_DIR" -type f -name "*-${CHUNK_INDEX}.txt" -size +1k -print0 | while IFS= read -r -d '' f; do
+                    echo "== $f (head) =="
+                    head -n5 "$f" || true
+                    echo "== $f (tail) =="
+                    tail -n5 "$f" || true
+          done
+
+          # repository-side view: what results/ files already exist in the cloned repo
+          echo "DEBUG: repository results/ tree (in $TMP_DIR) before merge (ls -l):"
+          ls -l "$TMP_DIR/results" 2>/dev/null || true
+          git -C "$TMP_DIR" status --porcelain --untracked-files=no || true
+          git -C "$TMP_DIR" ls-files -s results/** 2>/dev/null || true
+
+          git add results/
+
+          if git diff --staged --quiet; then
+                    echo "No new unique data to commit for shard ${CHUNK_INDEX} after merging."
+                    exit 0
+          fi
+
+          git commit -m "feat: Update results from shard ${CHUNK_INDEX}"
+
+          MAX_ATTEMPTS=5
+          for (( i=1; i<=MAX_ATTEMPTS; i++ )); do
+                    echo "[Attempt $i/$MAX_ATTEMPTS] Pushing results for shard ${CHUNK_INDEX}..."
+                    if git pull --rebase origin "$GIT_BRANCH" && git push origin "$GIT_BRANCH"; then
+                              echo "✅ Successfully pushed results for shard ${CHUNK_INDEX}."
+                              exit 0
+                    fi
+                    echo "Push failed. Retrying in $(( 5 * i )) seconds..."
+                    sleep $(( 5 * i ))
+          done
+
+          echo "::error:: All push attempts failed for shard ${CHUNK_INDEX}."
+          exit 0
+
+  
+  dispatch-next:
+    name: dispatch-next-run
+    runs-on: ubuntu-latest
+    
+    needs: [prepare, brute]
+    if: always()
+    env:
+      PAT_TOKEN: ${{ secrets.PAT_TOKEN }}
+    steps:
+      - name: Compute and dispatch next run
+        shell: bash
+        run: |
+          if [ -z "${PAT_TOKEN}" ]; then echo "Error: secrets.PAT_TOKEN is required." >&2; exit 0; fi
+          CHUNK_START=${{ github.event.inputs.chunk_start }}
+          TOTAL_CHUNKS=${{ needs.prepare.outputs.total-chunks }}
+          RUN_COUNTER=${{ github.event.inputs.run_counter }}
+          MAX_RUNS=${{ needs.prepare.outputs.effective-max-runs }}
+          MATRIX_SIZE=${{ env.MATRIX_SIZE }}
+          NEXT_START=$((CHUNK_START + MATRIX_SIZE))
+          NEXT_COUNTER=$((RUN_COUNTER + 1))
+          echo "Current start: ${CHUNK_START}, Next start: ${NEXT_START}, Total chunks: ${TOTAL_CHUNKS}"
+          if [ "$NEXT_START" -ge "$TOTAL_CHUNKS" ]; then echo "All chunks processed. Terminating."; exit 0; fi
+          if [ "${NEXT_COUNTER}" -ge "${MAX_RUNS}" ]; then echo "Next run would exceed max_runs limit. Terminating."; exit 0; fi
+          URL="https://api.github.com/repos/${{ github.repository }}/actions/workflows/${{ env.WORKFLOW_FILE }}/dispatches"
+          BODY=$(printf '{"ref":"%s","inputs":{"chunk_start":"%s","total_chunks":"%s","run_counter":"%s","max_runs":"%s","words_per_chunk":"%s","domains_count":"%s"}}' \
+            "${{ github.ref_name }}" "${NEXT_START}" "${TOTAL_CHUNKS}" "${NEXT_COUNTER}" "${MAX_RUNS}" \
+            "${{ github.event.inputs.words_per_chunk }}" "${{ github.event.inputs.domains_count }}")
+          echo "Dispatching next run..."
+          for i in 1 2 3 4; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${PAT_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" -d "$BODY" "$URL")
+            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then echo "Dispatch succeeded (HTTP ${HTTP_STATUS})"; exit 0; fi
+            echo "Dispatch attempt ${i} failed (HTTP ${HTTP_STATUS}). Retrying..."
+            sleep $((i * 2))
+          done
+          echo "Failed to dispatch next run after retries. Terminating with an error."
+          exit 0

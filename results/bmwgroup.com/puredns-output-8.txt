@@ -1,0 +1,6 @@
+mdm-dev.bmwgroup.com
+mpos.bmwgroup.com
+mpp.bmwgroup.com
+mxs1.bmwgroup.com
+my-test.bmwgroup.com
+n3.bmwgroup.com

@@ -1,0 +1,4 @@
+datafox.bmwgroup.com
+dems.bmwgroup.com
+dfe.bmwgroup.com
+dmp-test.bmwgroup.com

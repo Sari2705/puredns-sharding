@@ -1,0 +1,5 @@
+vds.bmwgroup.com
+vecom.bmwgroup.com
+vera.bmwgroup.com
+webservice.bmwgroup.com
+webshop-test.bmwgroup.com

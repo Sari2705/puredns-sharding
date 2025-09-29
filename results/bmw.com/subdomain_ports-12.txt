@@ -1,0 +1,9 @@
+explicitfacts.bmw.com:10050
+explicitfacts.bmw.com:123
+explicitfacts.bmw.com:80
+fleetistics69.bmw.com:10050
+fleetistics69.bmw.com:123
+fleetistics69.bmw.com:80
+getjohnsonoutpic.bmw.com:10050
+getjohnsonoutpic.bmw.com:123
+getjohnsonoutpic.bmw.com:80
